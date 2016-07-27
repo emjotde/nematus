@@ -26,8 +26,6 @@ from alignment_util import *
 
 profile = False
 
-encoders = 2;
-
 # push parameters to Theano shared variables
 def zipp(params, tparams):
     for kk, vv in params.iteritems():
@@ -191,47 +189,51 @@ def embedding_name(i):
         return 'Wemb'+str(i)
 
 # batch preparation
-def prepare_data(seqs_x, seqs_y, maxlen=None, n_words_src=30000,
+def prepare_data(seqs_xs, seqs_y, maxlen=None, n_words_src=[30000],
                  n_words=30000):
-    # x: a list of sentences
-    lengths_x = [len(s) for s in seqs_x]
-    lengths_y = [len(s) for s in seqs_y]
-
-    if maxlen is not None:
-        new_seqs_x = []
-        new_seqs_y = []
-        new_lengths_x = []
-        new_lengths_y = []
-        for l_x, s_x, l_y, s_y in zip(lengths_x, seqs_x, lengths_y, seqs_y):
-            if l_x < maxlen and l_y < maxlen:
-                new_seqs_x.append(s_x)
-                new_lengths_x.append(l_x)
-                new_seqs_y.append(s_y)
-                new_lengths_y.append(l_y)
-        lengths_x = new_lengths_x
-        seqs_x = new_seqs_x
-        lengths_y = new_lengths_y
-        seqs_y = new_seqs_y
-
-        if len(lengths_x) < 1 or len(lengths_y) < 1:
+    new_seqs_xs = []
+    new_seqs_y = []
+    max_lengths = [0] * (len(seqs_xs[0]) + 1)
+    for xs, y in zip(seqs_xs, seqs_y):
+        lengths = [len(x) for x in xs + [y]]
+        for i, l in enumerate(lengths):
+            if l > max_lengths[i] and l < maxlen:
+                max_lengths[i] = l
+        if all([l < maxlen for l in lengths]):
+            new_seqs_xs.append(xs)
+            new_seqs_y.append(y)
+        if any([l < 1 for l in lengths]):
             return None, None, None, None
+    seqs_xs = new_seqs_xs
+    seqs_y = new_seqs_y
 
-    n_samples = len(seqs_x)
-    n_factors = len(seqs_x[0][0])
-    maxlen_x = numpy.max(lengths_x) + 1
-    maxlen_y = numpy.max(lengths_y) + 1
-
-    x = numpy.zeros((n_factors, maxlen_x, n_samples)).astype('int64')
+    n_samples = len(seqs_y)
+    xs = []
+    x_masks = []
+    for i, seqs_x in enumerate(seqs_xs[0]):
+        n_factors = len(seqs_x[0])
+        maxlen_x = max_lengths[i] + 1    
+        x = numpy.zeros((n_factors, maxlen_x, n_samples)).astype('int64')
+        xs.append(x)
+        
+        x_mask = numpy.zeros((maxlen_x, n_samples)).astype('float32')
+        x_masks.append(x_mask)
+        
+    maxlen_y = max_lengths[-1] + 1
     y = numpy.zeros((maxlen_y, n_samples)).astype('int64')
-    x_mask = numpy.zeros((maxlen_x, n_samples)).astype('float32')
     y_mask = numpy.zeros((maxlen_y, n_samples)).astype('float32')
-    for idx, [s_x, s_y] in enumerate(zip(seqs_x, seqs_y)):
-        x[:, :lengths_x[idx], idx] = zip(*s_x)
-        x_mask[:lengths_x[idx]+1, idx] = 1.
-        y[:lengths_y[idx], idx] = s_y
-        y_mask[:lengths_y[idx]+1, idx] = 1.
+    
+    for idx, [s_xs, s_y] in enumerate(zip(seqs_xs, seqs_y)):
+        for i, s_x in enumerate(s_xs):
+            len_x = len(s_x)
+            xs[i][:, :len_x, idx] = zip(*s_x)
+            x_masks[i][:len_x+1, idx] = 1.
 
-    return [x] * encoders, [x_mask] * encoders, y, y_mask
+        len_y = len(s_y)
+        y[:len_y, idx] = s_y
+        y_mask[:len_y+1, idx] = 1.
+
+    return xs, x_masks, y, y_mask
 
 
 # feedforward layer: affine transformation + point-wise nonlinearity
@@ -316,6 +318,8 @@ def gru_layer(tparams, state_below, options, prefix='gru', mask=None,
     # arguments    | sequences |outputs-info| non-seqs
     def _step_slice(m_, x_, xx_, h_, U, Ux, rec_dropout):
 
+        
+
         preact = tensor.dot(h_*rec_dropout[0], U)
         preact += x_
 
@@ -396,13 +400,13 @@ def param_init_gru_cond(options, params, prefix='gru_cond',
     params[_p(prefix, 'bx_nl')] = numpy.zeros((dim_nonlin,)).astype('float32')
 
     # context to LSTM
-    Wc = norm_weight(dimctx * encoders, dim*2)
+    Wc = norm_weight(dimctx * options['encoders'], dim*2)
     params[_p(prefix, 'Wc')] = Wc
     
-    Wcx = norm_weight(dimctx * encoders, dim)
+    Wcx = norm_weight(dimctx * options['encoders'], dim)
     params[_p(prefix, 'Wcx')] = Wcx
 
-    for i in range(encoders):
+    for i in range(options['encoders']):
         # attention: combined -> hidden
         W_comb_att = norm_weight(dim, dimctx)
         params[_p(prefix, 'W_comb_att', i)] = W_comb_att    
@@ -457,7 +461,7 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
     for i, context in enumerate(contexts):
         assert context.ndim == 3, \
             'Context must be 3-d: #annotation x #sample x dim'
-        pctx_ = tensor.dot(context*ctx_dropout[0], tparams[_p(prefix, 'Wc_att', i)]) +\
+        pctx_ = tensor.dot(context * ctx_dropout[0], tparams[_p(prefix, 'Wc_att', i)]) +\
             tparams[_p(prefix, 'b_att', i)]
         pctxs_.append(pctx_)
 
@@ -484,7 +488,7 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
         r1 = _slice(preact1, 0, dim)
         u1 = _slice(preact1, 1, dim)
 
-        preactx1 = tensor.dot(h_*rec_dropout[1], Ux)
+        preactx1 = tensor.dot(h_ * rec_dropout[1], Ux)
         preactx1 *= r1
         preactx1 += xx_
 
@@ -498,11 +502,11 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
         alphas = []
         for i in range(len(attention_args) / 5):
             pctx_, cc_, W_comb_att, U_att, c_tt = attention_args[i*5:i*5+5]
-            pstate_ = tensor.dot(h1*rec_dropout[2], W_comb_att)
+            pstate_ = tensor.dot(h1 * rec_dropout[2], W_comb_att)
             pctx__ = pctx_ + pstate_[None, :, :]
             pctx__ = tensor.tanh(pctx__)
             
-            alpha = tensor.dot(pctx__*ctx_dropout[1], U_att) + c_tt
+            alpha = tensor.dot(pctx__ * ctx_dropout[1], U_att) + c_tt
             alpha = alpha.reshape([alpha.shape[0], alpha.shape[1]])
             alpha = tensor.exp(alpha)
             if context_masks:
@@ -511,18 +515,17 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
             alphas.append(alpha.T)
             ctx_ = (cc_ * alpha[:, :, None]).sum(0)  # current context
             ctxs_.append(ctx_)
-            
-            
-        preact2 = tensor.dot(h1*rec_dropout[3], U_nl) + b_nl
+                        
+        ctx_ = concatenate(ctxs_, axis=1)
+        
+        preact2 = tensor.dot(h1 * rec_dropout[3], U_nl) + b_nl
         preact2 += tensor.dot(ctx_ * ctx_dropout[2], Wc)     
         preact2 = tensor.nnet.sigmoid(preact2)
 
         r2 = _slice(preact2, 0, dim)
         u2 = _slice(preact2, 1, dim)
 
-        ctx_ = concatenate(ctxs_, axis=1)
-    
-        preactx2 = tensor.dot(h1*rec_dropout[4], Ux_nl)+bx_nl
+        preactx2 = tensor.dot(h1 * rec_dropout[4], Ux_nl) + bx_nl
         preactx2 *= r2
         preactx2 += tensor.dot(ctx_ * ctx_dropout[3], Wcx)
         h2 = tensor.tanh(preactx2)
@@ -548,7 +551,7 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
                 ]
         
     encoder_dependent = []
-    for i in range(encoders):
+    for i in range(options['encoders']):
         encoder_dependent += [
                         pctxs_[i],
                         contexts[i], 
@@ -565,7 +568,7 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
                                     sequences=seqs,
                                     outputs_info=[init_state,
                                                   tensor.alloc(0., n_samples,
-                                                               contexts[0].shape[2] * encoders),
+                                                               contexts[0].shape[2] * options['encoders']),
                                                   # @TODO: make this work with multiple attention matrices
                                                   tensor.alloc(0., n_samples,
                                                                contexts[0].shape[0])],
@@ -582,14 +585,14 @@ def init_params(options):
     params = OrderedDict()
 
     # embedding
-    for i in range(encoders):
-        for factor in range(options['factors']):
-            params[_n(embedding_name(factor), i)] = norm_weight(options['n_words_src'], options['dim_per_factor'][factor])
+    for i in range(options['encoders']):
+        for factor in range(options['factors'][i]):
+            params[_n(embedding_name(factor), i)] = norm_weight(options['n_words_src'][i], options['dim_per_factor'][i][factor])
 
     params['Wemb_dec'] = norm_weight(options['n_words'], options['dim_word'])
 
     # encoder: bidirectional RNN
-    for i in range(encoders):
+    for i in range(options['encoders']):
         params = get_layer(options['encoder'])[0](options, params,
                                                   prefix=_n('encoder', i),
                                                   nin=options['dim_word'],
@@ -602,7 +605,7 @@ def init_params(options):
 
     # init_state, init_cell
     params = get_layer('ff')[0](options, params, prefix='ff_state',
-                                nin=ctxdim * encoders, nout=options['dim'])
+                                nin=ctxdim * options['encoders'], nout=options['dim'])
     # decoder
     params = get_layer(options['decoder'])[0](options, params,
                                               prefix='decoder',
@@ -617,7 +620,7 @@ def init_params(options):
                                 nin=options['dim_word'],
                                 nout=options['dim_word'], ortho=False)
     params = get_layer('ff')[0](options, params, prefix='ff_logit_ctx',
-                                nin=ctxdim * encoders, nout=options['dim_word'],
+                                nin=ctxdim * options['encoders'], nout=options['dim_word'],
                                 ortho=False)
     params = get_layer('ff')[0](options, params, prefix='ff_logit',
                                 nin=options['dim_word'],
@@ -668,7 +671,7 @@ def build_model(tparams, options):
     xs = []
     x_masks = []
     contexts = []
-    for i in range(encoders):
+    for i in range(options['encoders']):
         # description string: #words x #samples
         x = tensor.tensor3(_n('x', i), dtype='int64')
         x.tag.test_value = (numpy.random.rand(1, 5, 10)*100).astype('int64')
@@ -687,7 +690,7 @@ def build_model(tparams, options):
 
         # word embedding for forward rnn (source)
         emb = []
-        for factor in range(options['factors']):
+        for factor in range(options['factors'][i]):
             emb.append(tparams[_n(embedding_name(factor), i)][x[factor].flatten()])
         emb = concatenate(emb, axis=1)
         emb = emb.reshape([n_timesteps, n_samples, options['dim_word']])
@@ -696,7 +699,7 @@ def build_model(tparams, options):
 
         # word embedding for backward rnn (source)
         embr = []
-        for factor in range(options['factors']):
+        for factor in range(options['factors'][i]):
             embr.append(tparams[_n(embedding_name(factor), i)][xr[factor].flatten()])
         embr = concatenate(embr, axis=1)
         embr = embr.reshape([n_timesteps, n_samples, options['dim_word']])
@@ -720,11 +723,11 @@ def build_model(tparams, options):
         contexts.append(ctx)
     
     # mean of the context (across time) will be used to initialize decoder rnn
-    ctx_mean = concatenate([(ctx * x_mask[:, :, None]).sum(0) / x_mask.sum(0)[:, None]
-        for ctx in contexts], axis=1)
+    ctx_mean = concatenate([(ctx * x_masks[i][:, :, None]).sum(0) / x_masks[i].sum(0)[:, None]
+        for i, ctx in enumerate(contexts)], axis=1)
     
     if options['use_dropout']:
-        ctx_mean *= shared_dropout_layer((n_samples, 2*options['dim']*encoders), use_noise, trng, retain_probability_hidden)
+        ctx_mean *= shared_dropout_layer((n_samples, 2*options['dim']*options['encoders']), use_noise, trng, retain_probability_hidden)
 
     # initial decoder state
     init_state = get_layer('ff')[1](tparams, ctx_mean, options,
@@ -828,7 +831,7 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
 
     xs = []
     contexts = []
-    for i in range(encoders):
+    for i in range(options['encoders']):
         x = tensor.tensor3(_n('x', i), dtype='int64')
         xs.append(x)
         
@@ -839,7 +842,7 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
         # word embedding (source), forward and backward
         emb = []
         embr = []
-        for factor in range(options['factors']):
+        for factor in range(options['factors'][i]):
             emb.append(tparams[_n(embedding_name(factor), i)][x[factor].flatten()])
             embr.append(tparams[_n(embedding_name(factor), i)][xr[factor].flatten()])
         emb = concatenate(emb, axis=1)
@@ -1113,16 +1116,17 @@ def pred_probs(f_log_probs, prepare_data, options, iterator, verbose=True, norma
 
     alignments_json = []
 
-    for x, y in iterator:
+    for xs, y in iterator:
         #ensure consistency in number of factors
-        if len(x[0][0]) != options['factors']:
-            sys.stderr.write('Error: mismatch between number of factors in settings ({0}), and number in validation corpus ({1})\n'.format(options['factors'], len(x[0][0])))
-            sys.exit(1)
+        for i, x in enumerate(xs):
+            if len(x[0][i]) != options['factors'][i]:
+                sys.stderr.write('Error: mismatch between number of factors in settings ({0}), and number in validation corpus ({1})\n'.format(options['factors'][i], len(x[0][i])))
+                sys.exit(1)
 
-        n_done += len(x)
+        n_done += len(xs[0])
 
         # @TODO: fix this
-        xs, x_masks, y, y_mask = prepare_data(x, y,
+        xs, x_masks, y, y_mask = prepare_data(xs, y,
                                             n_words_src=options['n_words_src'],
                                             n_words=options['n_words'])
 
@@ -1264,7 +1268,8 @@ def sgd(lr, tparams, grads, inp, cost):
 
 def train(dim_word=100,  # word vector dimensionality
           dim=1000,  # the number of LSTM units
-          factors=1, # input factors
+          factors=[1], # input factors
+          encoders=1,
           dim_per_factor=None, # list of word vector dimensionalities (one per factor): [250,200,50] for total dimensionality of 500
           encoder='gru',
           decoder='gru_cond',
@@ -1276,7 +1281,7 @@ def train(dim_word=100,  # word vector dimensionality
           alpha_c=0.,  # alignment regularization
           clip_c=-1.,  # gradient clipping threshold
           lrate=0.01,  # learning rate
-          n_words_src=100000,  # source vocabulary size
+          n_words_src=[100000],  # source vocabulary size
           n_words=100000,  # target vocabulary size
           maxlen=100,  # maximum length of the description
           optimizer='rmsprop',
@@ -1292,7 +1297,7 @@ def train(dim_word=100,  # word vector dimensionality
           valid_datasets=['../data/dev/newstest2011.en.tok',
                           '../data/dev/newstest2011.fr.tok'],
           dictionaries=[
-              '/data/lisatmp3/chokyun/europarl/europarl-v7.fr-en.en.tok.pkl',
+              ['/data/lisatmp3/chokyun/europarl/europarl-v7.fr-en.en.tok.pkl'],
               '/data/lisatmp3/chokyun/europarl/europarl-v7.fr-en.fr.tok.pkl'],
           use_dropout=False,
           dropout_embedding=0.2, # dropout for input embeddings (0: no dropout)
@@ -1310,25 +1315,29 @@ def train(dim_word=100,  # word vector dimensionality
     model_options = locals().copy()
 
 
+    # @TODO : fix this!
     if model_options['dim_per_factor'] == None:
-        if factors == 1:
-            model_options['dim_per_factor'] = [model_options['dim_word']]
-        else:
-            sys.stderr.write('Error: if using factored input, you must specify \'dim_per_factor\'\n')
-            sys.exit(1)
-
-    assert(len(dictionaries) == factors + 1) # one dictionary per source factor + 1 for target factor
-    assert(len(model_options['dim_per_factor']) == factors) # each factor embedding has its own dimensionality
-    assert(sum(model_options['dim_per_factor']) == model_options['dim_word']) # dimensionality of factor embeddings sums up to total dimensionality of input embedding vector
+        model_options['dim_per_factor'] = []
+        for factor in factors:
+            if factor == 1:
+                model_options['dim_per_factor'].append([model_options['dim_word']])
+            else:
+                sys.stderr.write('Error: if using factored input, you must specify \'dim_per_factor\'\n')
+                sys.exit(1)
+     
+    # for i, f_dictionaries in enumerate(dictionaries[:-1]):
+    #     assert(len(f_dictionaries) == factors[i]) # one dictionary per source factor + 1 for target factor
+    # assert(len(model_options['dim_per_factor']) == factors) # each factor embedding has its own dimensionality
+    # assert(sum(model_options['dim_per_factor']) == model_options['dim_word']) # dimensionality of factor embeddings sums up to total dimensionality of input embedding vector
 
     # load dictionaries and invert them
-    worddicts = [None] * len(dictionaries)
-    worddicts_r = [None] * len(dictionaries)
-    for ii, dd in enumerate(dictionaries):
-        worddicts[ii] = load_dict(dd)
-        worddicts_r[ii] = dict()
-        for kk, vv in worddicts[ii].iteritems():
-            worddicts_r[ii][vv] = kk
+    # worddicts = [None] * len(dictionaries)
+    # worddicts_r = [None] * len(dictionaries)
+    # for ii, dd in enumerate(dictionaries):
+    #     worddicts[ii] = load_dict(dd)
+    #     worddicts_r[ii] = dict()
+    #     for kk, vv in worddicts[ii].iteritems():
+    #         worddicts_r[ii][vv] = kk
 
     # reload options
     if reload_ and os.path.exists(saveto):
@@ -1341,19 +1350,19 @@ def train(dim_word=100,  # word vector dimensionality
                 model_options = pkl.load(f)
 
     print 'Loading data'
-    train = TextIterator(datasets[0], datasets[1],
-                         dictionaries[:-1], dictionaries[-1],
+    train = TextIterator(datasets[0:-1], datasets[-1],
+                         dictionaries[0:-1], dictionaries[-1],
                          n_words_source=n_words_src, n_words_target=n_words,
                          batch_size=batch_size,
                          maxlen=maxlen,
                          shuffle_each_epoch=shuffle_each_epoch,
                          maxibatch_size=maxibatch_size)
-    valid = TextIterator(valid_datasets[0], valid_datasets[1],
-                         dictionaries[:-1], dictionaries[-1],
+    valid = TextIterator(valid_datasets[0:-1], valid_datasets[-1],
+                         dictionaries[0:-1], dictionaries[-1],
                          n_words_source=n_words_src, n_words_target=n_words,
                          batch_size=valid_batch_size,
                          maxlen=maxlen)
-
+    
     print 'Building model'
     params = init_params(model_options)
     # reload parameters
@@ -1457,21 +1466,22 @@ def train(dim_word=100,  # word vector dimensionality
     for eidx in xrange(max_epochs):
         n_samples = 0
 
-        for x, y in train:
-            n_samples += len(x)
+        for xs, y in train:
+            n_samples += len(y)
             uidx += 1
             use_noise.set_value(1.)
 
             #ensure consistency in number of factors
-            if len(x) and len(x[0]) and len(x[0][0]) != factors:
-                sys.stderr.write('Error: mismatch between number of factors in settings ({0}), and number in training corpus ({1})\n'.format(factors, len(x[0][0])))
-                sys.exit(1)
+            for i in range(len(factors)):
+                if len(xs[0]) and len(xs[0][0]) and len(xs[0][0][i]) != factors[i]:
+                    sys.stderr.write('Error: mismatch between number of factors in settings ({0}), and number in training corpus ({1})\n'.format(factors[i], len(xs[0][0][i])))
+                    sys.exit(1)
 
-            xs, x_masks, y, y_mask = prepare_data(x, y, maxlen=maxlen,
+            xs, x_masks, y, y_mask = prepare_data(xs, y, maxlen=maxlen,
                                                 n_words_src=n_words_src,
                                                 n_words=n_words)
 
-            if x is None:
+            if xs is None:
                 print 'Minibatch with zero sample under length ', maxlen
                 uidx -= 1
                 continue
@@ -1518,56 +1528,56 @@ def train(dim_word=100,  # word vector dimensionality
                     print 'Done'
 
 
-            # generate some samples with the model and display them
-            if numpy.mod(uidx, sampleFreq) == 0:
-                # FIXME: random selection?
-                for jj in xrange(numpy.minimum(5, x.shape[2])):
-                    stochastic = True
-                    sample, score, sample_word_probs, alignment = gen_sample([f_init], [f_next],
-                                               x[:, :, jj][:, :, None],
-                                               trng=trng, k=1,
-                                               maxlen=30,
-                                               stochastic=stochastic,
-                                               argmax=False,
-                                               suppress_unk=False)
-                    print 'Source ', jj, ': ',
-                    for pos in range(x.shape[1]):
-                        if x[0, pos, jj] == 0:
-                            break
-                        for factor in range(factors):
-                            vv = x[factor, pos, jj]
-                            if vv in worddicts_r[factor]:
-                                sys.stdout.write(worddicts_r[factor][vv])
-                            else:
-                                sys.stdout.write('UNK')
-                            if factor+1 < factors:
-                                sys.stdout.write('|')
-                            else:
-                                sys.stdout.write(' ')
-                    print
-                    print 'Truth ', jj, ' : ',
-                    for vv in y[:, jj]:
-                        if vv == 0:
-                            break
-                        if vv in worddicts_r[-1]:
-                            print worddicts_r[-1][vv],
-                        else:
-                            print 'UNK',
-                    print
-                    print 'Sample ', jj, ': ',
-                    if stochastic:
-                        ss = sample
-                    else:
-                        score = score / numpy.array([len(s) for s in sample])
-                        ss = sample[score.argmin()]
-                    for vv in ss:
-                        if vv == 0:
-                            break
-                        if vv in worddicts_r[-1]:
-                            print worddicts_r[-1][vv],
-                        else:
-                            print 'UNK',
-                    print
+            # # generate some samples with the model and display them
+            # if numpy.mod(uidx, sampleFreq) == 0:
+            #     # FIXME: random selection?
+            #     for jj in xrange(numpy.minimum(5, x.shape[2])):
+            #         stochastic = True
+            #         sample, score, sample_word_probs, alignment = gen_sample([f_init], [f_next],
+            #                                    [x[:, :, jj][:, :, None] for x in xs],
+            #                                    trng=trng, k=1,
+            #                                    maxlen=30,
+            #                                    stochastic=stochastic,
+            #                                    argmax=False,
+            #                                    suppress_unk=False)
+            #         print 'Source ', jj, ': ',
+            #         for pos in range(xs[0].shape[1]):
+            #             if xs[0][0, pos, jj] == 0:
+            #                 break
+            #             for factor in range(factors):
+            #                 vv = xs[0][factor, pos, jj]
+            #                 if vv in worddicts_r[factor]:
+            #                     sys.stdout.write(worddicts_r[factor][vv])
+            #                 else:
+            #                     sys.stdout.write('UNK')
+            #                 if factor+1 < factors:
+            #                     sys.stdout.write('|')
+            #                 else:
+            #                     sys.stdout.write(' ')
+            #         print
+            #         print 'Truth ', jj, ' : ',
+            #         for vv in y[:, jj]:
+            #             if vv == 0:
+            #                 break
+            #             if vv in worddicts_r[-1]:
+            #                 print worddicts_r[-1][vv],
+            #             else:
+            #                 print 'UNK',
+            #         print
+            #         print 'Sample ', jj, ': ',
+            #         if stochastic:
+            #             ss = sample
+            #         else:
+            #             score = score / numpy.array([len(s) for s in sample])
+            #             ss = sample[score.argmin()]
+            #         for vv in ss:
+            #             if vv == 0:
+            #                 break
+            #             if vv in worddicts_r[-1]:
+            #                 print worddicts_r[-1][vv],
+            #             else:
+            #                 print 'UNK',
+            #         print
 
             # validate model on validation set and early stop if necessary
             if numpy.mod(uidx, validFreq) == 0:
