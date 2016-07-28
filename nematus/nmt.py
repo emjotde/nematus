@@ -189,7 +189,9 @@ def embedding_name(i):
         return 'Wemb'+str(i)
 
 # batch preparation
-def prepare_data(seqs_xs, seqs_y, maxlen=None, n_words_src=[30000],
+def prepare_data(seqs_xs, seqs_y,
+                 maxlen=None,
+                 n_words_src=[30000],
                  n_words=30000):
     new_seqs_xs = []
     new_seqs_y = []
@@ -197,9 +199,9 @@ def prepare_data(seqs_xs, seqs_y, maxlen=None, n_words_src=[30000],
     for xs, y in zip(seqs_xs, seqs_y):
         lengths = [len(x) for x in xs + [y]]
         for i, l in enumerate(lengths):
-            if l > max_lengths[i] and l < maxlen:
+            if l > max_lengths[i] and (not maxlen or l < maxlen):
                 max_lengths[i] = l
-        if all([l < maxlen for l in lengths]):
+        if not maxlen or all([l < maxlen for l in lengths]):
             new_seqs_xs.append(xs)
             new_seqs_y.append(y)
         if any([l < 1 for l in lengths]):
@@ -954,7 +956,7 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
 
 # generate sample, either with stochastic sampling or beam search. Note that,
 # this function iteratively calls f_init and f_next functions.
-def gen_sample(f_init, f_next, x, trng=None, k=1, maxlen=30,
+def gen_sample(f_init, f_next, xs, trng=None, k=1, maxlen=30,
                stochastic=True, argmax=False, return_alignment=False, suppress_unk=False):
 
     # k is the beam size we have
@@ -988,14 +990,15 @@ def gen_sample(f_init, f_next, x, trng=None, k=1, maxlen=30,
     dec_alphas = [None]*num_models
     # get initial state of decoder rnn and encoder context
     for i in xrange(num_models):
-        ret = f_init[i](x)
+        ret = f_init[i](xs)
         next_state[i] = ret[0]
-        ctx0[i] = ret[1]
+        ctx0[i] = ret[1] # @TODO: multiple contexts
     next_w = -1 * numpy.ones((1,)).astype('int64')  # bos indicator
 
     # x is a sequence of word ids followed by 0, eos id
     for ii in xrange(maxlen):
         for i in xrange(num_models):
+            # @TODO : multiple contexts
             ctx = numpy.tile(ctx0[i], [live_k, 1])
             inps = [next_w, ctx, next_state[i]]
             ret = f_next[i](*inps)
@@ -1118,25 +1121,24 @@ def pred_probs(f_log_probs, prepare_data, options, iterator, verbose=True, norma
 
     for xs, y in iterator:
         #ensure consistency in number of factors
-        for i, x in enumerate(xs):
-            if len(x[0][i]) != options['factors'][i]:
-                sys.stderr.write('Error: mismatch between number of factors in settings ({0}), and number in validation corpus ({1})\n'.format(options['factors'][i], len(x[0][i])))
+        for i in range(len(options['factors'])):
+            if len(xs[i]) and len(xs[i][0]) and len(xs[i][0][0]) != options['factors'][i]:
+                sys.stderr.write('Error: mismatch between number of factors in settings ({0}), and number in validation corpus ({1})\n'.format(options['factors'][i], len(xs[i][0])))
                 sys.exit(1)
 
         n_done += len(xs[0])
 
-        # @TODO: fix this
         xs, x_masks, y, y_mask = prepare_data(xs, y,
-                                            n_words_src=options['n_words_src'],
-                                            n_words=options['n_words'])
+                                              n_words_src=options['n_words_src'],
+                                              n_words=options['n_words'])
 
         ### in optional save weights mode.
         if alignweights:
-            pprobs, attention = f_log_probs(xs, x_masks, y, y_mask)
+            pprobs, attention = f_log_probs(*(interleave(xs, x_masks) + [y, y_mask]))
             for jdata in get_alignments(attention, x_masks, y_mask):
                 alignments_json.append(jdata)
         else:
-            pprobs = f_log_probs(xs, x_masks, y, y_mask)
+            pprobs = f_log_probs(*(interleave(xs, x_masks) + [y, y_mask]))
 
         # normalize scores according to output length
         if normalize:
@@ -1473,7 +1475,7 @@ def train(dim_word=100,  # word vector dimensionality
 
             #ensure consistency in number of factors
             for i in range(len(factors)):
-                if len(xs[0]) and len(xs[0][0]) and len(xs[0][0][i]) != factors[i]:
+                if len(xs[i]) and len(xs[i][0]) and len(xs[i][0][0]) != factors[i]:
                     sys.stderr.write('Error: mismatch between number of factors in settings ({0}), and number in training corpus ({1})\n'.format(factors[i], len(xs[0][0][i])))
                     sys.exit(1)
 
