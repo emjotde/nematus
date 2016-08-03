@@ -1,3 +1,4 @@
+#!/usr/bin/python
 '''
 Translates a source file using a translation model.
 '''
@@ -12,7 +13,8 @@ from multiprocessing import Process, Queue
 from util import load_dict
 
 
-def translate_model(queue, rqueue, pid, models, options, k, normalize, verbose, nbest, return_alignment, suppress_unk):
+def translate_model(queue, rqueue, pid, models, options, k, normalize, verbose,
+                    nbest, return_alignment, suppress_unk):
 
     from nmt import (build_sampler, gen_sample, load_params,
                  init_params, init_tparams)
@@ -35,7 +37,8 @@ def translate_model(queue, rqueue, pid, models, options, k, normalize, verbose, 
         tparams = init_tparams(params)
 
         # word index
-        f_init, f_next = build_sampler(tparams, option, use_noise, trng, return_alignment=return_alignment)
+        f_init, f_next = build_sampler(tparams, option, use_noise, trng,
+                                       return_alignment=return_alignment)
 
         fs_init.append(f_init)
         fs_next.append(f_next)
@@ -75,33 +78,35 @@ def translate_model(queue, rqueue, pid, models, options, k, normalize, verbose, 
 # prints alignment weights for a hypothesis
 # dimension (target_words+1 * source_words+1)
 def print_matrix(hyp, file):
-  # each target word has corresponding alignment weights
-  for target_word_alignment in hyp:
-    # each source hidden state has a corresponding weight
-    for w in target_word_alignment:
-      print >>file, w,
+    # each target word has corresponding alignment weights
+    for target_word_alignment in hyp:
+        # each source hidden state has a corresponding weight
+        for w in target_word_alignment:
+            print >>file, w,
+        print >> file, ""
     print >> file, ""
-  print >> file, ""
 
-import json, io
+import json
 def print_matrix_json(hyp, source, target, sid, tid, file):
-  source.append("</s>")
-  target.append("</s>")
-  links = []
-  for ti, target_word_alignment in enumerate(hyp):
-    for si,w in enumerate(target_word_alignment):
-      links.append((target[ti], source[si], str(w), sid, tid))
-  json.dump(links,file, ensure_ascii=False)
+    source.append("</s>")
+    target.append("</s>")
+    links = []
+    for ti, target_word_alignment in enumerate(hyp):
+        for si,w in enumerate(target_word_alignment):
+           links.append((target[ti], source[si], str(w), sid, tid))
+    json.dump(links,file, ensure_ascii=False)
 
 
 def print_matrices(mm, file):
-  for hyp in mm:
-    print_matrix(hyp, file)
-    print >>file, "\n"
+    for hyp in mm:
+        print_matrix(hyp, file)
+        print >> file, "\n"
 
 
-def main(models, source_file, saveto, save_alignment, k=5,
-         normalize=False, n_process=5, chr_level=False, verbose=False, nbest=False, suppress_unk=False, a_json=False, print_word_probabilities=False):
+def main(models, source_files, saveto, save_alignment, k=5,
+         normalize=False, n_process=5, chr_level=False, verbose=False,
+         nbest=False, suppress_unk=False, a_json=False,
+         print_word_probabilities=False):
     # load model model_options
     options = []
     for model in args.models:
@@ -115,38 +120,43 @@ def main(models, source_file, saveto, save_alignment, k=5,
         #hacks for using old models with missing options
         if not 'dropout_embedding' in options[-1]:
             options[-1]['dropout_embedding'] = 0
-        if not 'dropout_hidden' in options[-1]:
+        if 'dropout_hidden' not in options[-1]:
             options[-1]['dropout_hidden'] = 0
-        if not 'dropout_source' in options[-1]:
+        if 'dropout_source' not in options[-1]:
             options[-1]['dropout_source'] = 0
-        if not 'dropout_target' in options[-1]:
+        if 'dropout_target' not in options[-1]:
             options[-1]['dropout_target'] = 0
-        if not 'factors' in options[-1]:
+        if 'factors' not in options[-1]:
             options[-1]['factors'] = 1
-        if not 'dim_per_factor' in options[-1]:
+        if 'dim_per_factor' not in options[-1]:
             options[-1]['dim_per_factor'] = [options[-1]['dim_word']]
 
     dictionaries = options[0]['dictionaries']
 
-    dictionaries_source = dictionaries[:-1]
+    dictionaries_sources = dictionaries[:-1]
     dictionary_target = dictionaries[-1]
 
-    # load source dictionary and invert
-    word_dicts = []
-    word_idicts = []
-    for dictionary in dictionaries_source:
-        word_dict = load_dict(dictionary)
-        if options[0]['n_words_src']:
-            for key, idx in word_dict.items():
-                if idx >= options[0]['n_words_src']:
-                    del word_dict[key]
-        word_idict = dict()
-        for kk, vv in word_dict.iteritems():
-            word_idict[vv] = kk
-        word_idict[0] = '<eos>'
-        word_idict[1] = 'UNK'
-        word_dicts.append(word_dict)
-        word_idicts.append(word_idict)
+    encoders_word_dicts = []
+    encoders_word_idicts = []
+    for dictionaries_source in dictionaries_sources:
+        # load source dictionary and invert
+        word_dicts = []
+        word_idicts = []
+        for dictionary in dictionaries_source:
+            word_dict = load_dict(dictionary)
+            if options[0]['n_words_src']:
+                for key, idx in word_dict.items():
+                    if idx >= options[0]['n_words_src']:
+                        del word_dict[key]
+            word_idict = dict()
+            for kk, vv in word_dict.iteritems():
+                word_idict[vv] = kk
+            word_idict[0] = '<eos>'
+            word_idict[1] = 'UNK'
+            word_dicts.append(word_dict)
+            word_idicts.append(word_idict)
+        encoders_word_dicts.append(word_dicts)
+        encoders_word_idicts.append(word_idicts)
 
     # load target dictionary and invert
     word_dict_trg = load_dict(dictionary_target)
@@ -163,7 +173,8 @@ def main(models, source_file, saveto, save_alignment, k=5,
     for midx in xrange(n_process):
         processes[midx] = Process(
             target=translate_model,
-            args=(queue, rqueue, midx, models, options, k, normalize, verbose, nbest, save_alignment is not None, suppress_unk))
+            args=(queue, rqueue, midx, models, options, k, normalize, verbose,
+                  nbest, save_alignment is not None, suppress_unk))
         processes[midx].start()
 
     # utility function
@@ -175,32 +186,40 @@ def main(models, source_file, saveto, save_alignment, k=5,
             ww.append(word_idict_trg[w])
         return ' '.join(ww)
 
-    def _send_jobs(f):
+    def _send_jobs(files):
         source_sentences = []
-        for idx, line in enumerate(f):
-            if chr_level:
-                words = list(line.decode('utf-8').strip())
-            else:
-                words = line.strip().split()
+        for idx, lines in enumerate(zip(*files)):
+            enc_idx = 0;
+            xs = []
+            enc_words = []
+            for line in lines:
+                if chr_level:
+                    words = list(line.decode('utf-8').strip())
+                else:
+                    words = line.strip().split()
 
-            x = []
-            for w in words:
-                w = [word_dicts[i][f] if f in word_dicts[i] else 1 for (i,f) in enumerate(w.split('|'))]
-                if len(w) != options[0]['factors']:
-                    sys.stderr.write('Error: expected {0} factors, but input word has {1}\n'.format(options[0]['factors'], len(w)))
-                    for midx in xrange(n_process):
-                        processes[midx].terminate()
-                    sys.exit(1)
-                x.append(w)
+                x = []
+                for w in words:
+                    w = [word_dicts[i][f] if f in word_dicts[i] else 1
+                        for (i, f) in enumerate(w.split('|'))]
+                    if len(w) != options[0]['factors'][enc_idx]:
+                        sys.stderr.write('Error: expected {0} factors, but input word has {1}\n'.format(options[0]['factors'][enc_idx], len(w)))
+                        for midx in xrange(n_process):
+                            processes[midx].terminate()
+                        sys.exit(1)
+                    x.append(w)
 
-            x += [[0]*options[0]['factors']]
-            queue.put((idx, x))
-            source_sentences.append(words)
+                x += [ [0] * options[0]['factors'][enc_idx] ]
+                xs.append(x)
+                enc_words.append(words)
+            queue.put((idx, xs))
+            source_sentences.append(enc_words)
+            enc_idx += 1
         return idx+1, source_sentences
 
-    def _finish_processes():
+    def _finish_processes(enc_number):
         for midx in xrange(n_process):
-            queue.put(None)
+            queue.put([None] * enc_number)
 
     def _retrieve_jobs(n_samples):
         trans = [None] * n_samples
@@ -214,9 +233,9 @@ def main(models, source_file, saveto, save_alignment, k=5,
                 yield trans[out_idx]
                 out_idx += 1
 
-    sys.stderr.write('Translating {0} ...\n'.format(source_file.name))
-    n_samples, source_sentences = _send_jobs(source_file)
-    _finish_processes()
+    sys.stderr.write('Translating {0} ...\n'.format(':'.join([f.name for f in source_files])))
+    n_samples, source_sentences = _send_jobs(source_files)
+    _finish_processes(len(source_files))
 
     for i, trans in enumerate(_retrieve_jobs(n_samples)):
         if nbest:
@@ -235,7 +254,7 @@ def main(models, source_file, saveto, save_alignment, k=5,
                     print_matrix(alignment[j], save_alignment)
         else:
             samples, scores, word_probs, alignment = trans
-    
+
             saveto.write(_seqs2words(samples) + "\n")
             if print_word_probabilities:
                 for prob in word_probs:
@@ -263,8 +282,8 @@ if __name__ == "__main__":
     parser.add_argument('-c', action="store_true", help="Character-level")
     parser.add_argument('-v', action="store_true", help="verbose mode.")
     parser.add_argument('--models', '-m', type=str, nargs = '+', required=True)
-    parser.add_argument('--input', '-i', type=argparse.FileType('r'),
-                        default=sys.stdin, metavar='PATH',
+    parser.add_argument('--input', '-i', nargs='+',
+                        default=[], metavar='PATH',
                         help="Input file (default: standard input)")
     parser.add_argument('--output', '-o', type=argparse.FileType('w'),
                         default=sys.stdout, metavar='PATH',
@@ -281,7 +300,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    main(args.models, args.input,
-         args.output, k=args.k, normalize=args.n, n_process=args.p,
-         chr_level=args.c, verbose=args.v, nbest=args.n_best, suppress_unk=args.suppress_unk, 
-         print_word_probabilities = args.print_word_probabilities, save_alignment=args.output_alignment, a_json=args.json_alignment)
+    inputs = []
+    if not args.input:
+        inputs.append(sys.stdin)
+    else:
+        for path in args.input:
+            inputs.append(open(path, 'r'))
+
+    main(args.models, inputs, args.output, k=args.k, normalize=args.n,
+         n_process=args.p, chr_level=args.c, verbose=args.v, nbest=args.n_best,
+         suppress_unk=args.suppress_unk,
+         print_word_probabilities = args.print_word_probabilities,
+         save_alignment=args.output_alignment, a_json=args.json_alignment)
