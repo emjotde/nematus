@@ -45,11 +45,10 @@ def translate_model(queue, rqueue, pid, models, options, k, normalize, verbose,
 
     def _translate(seq):
         # sample given an input sequence and obtain scores
+        input = [numpy.array(s).T.reshape([len(s[0]), len(s), 1]) for s in seq]
         sample, score, word_probs, alignment = gen_sample(fs_init, fs_next,
-                                   # @TODO: Handle multiple inputs
-                                   numpy.array(seq).T.reshape([len(seq[0]), len(seq), 1]),
-                                   trng=trng, k=k, maxlen=200,
-                                   stochastic=False, argmax=False, return_alignment=return_alignment, suppress_unk=suppress_unk)
+            input, trng=trng, k=k, maxlen=200, stochastic=False, argmax=False,
+            return_alignment=return_alignment, suppress_unk=suppress_unk)
 
         # normalize scores according to sequence lengths
         if normalize:
@@ -189,6 +188,7 @@ def main(models, source_files, saveto, save_alignment, k=5,
     def _send_jobs(files):
         source_sentences = []
         for idx, lines in enumerate(zip(*files)):
+            print lines
             enc_idx = 0;
             xs = []
             enc_words = []
@@ -210,16 +210,20 @@ def main(models, source_files, saveto, save_alignment, k=5,
                     x.append(w)
 
                 x += [ [0] * options[0]['factors'][enc_idx] ]
+                print "X:", x
                 xs.append(x)
                 enc_words.append(words)
+            print "XS:", xs
+            #  new_xs = [ [xs[j][i]   for j in range(len(xs)) ]  for i in range(len(xs[0])) ]
+            #  print "NEW XS:", new_xs
             queue.put((idx, xs))
             source_sentences.append(enc_words)
             enc_idx += 1
         return idx+1, source_sentences
 
-    def _finish_processes(enc_number):
+    def _finish_processes():
         for midx in xrange(n_process):
-            queue.put([None] * enc_number)
+            queue.put(None)
 
     def _retrieve_jobs(n_samples):
         trans = [None] * n_samples
@@ -235,7 +239,7 @@ def main(models, source_files, saveto, save_alignment, k=5,
 
     sys.stderr.write('Translating {0} ...\n'.format(':'.join([f.name for f in source_files])))
     n_samples, source_sentences = _send_jobs(source_files)
-    _finish_processes(len(source_files))
+    _finish_processes()
 
     for i, trans in enumerate(_retrieve_jobs(n_samples)):
         if nbest:
