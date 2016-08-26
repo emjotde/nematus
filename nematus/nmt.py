@@ -429,6 +429,42 @@ def param_init_gru_cond(options, params, prefix='gru_cond',
         c_att = numpy.zeros((1,)).astype('float32')
         params[_p(prefix, 'c_tt', i)] = c_att
 
+    # coverage
+    if options['coverage']:
+        cov_dim = options['coverage_dim']
+        V_att = norm_weight(cov_dim, dimctx)
+        params[_p(prefix, 'V_att')] = V_att
+
+        Wc_cov = norm_weight(cov_dim, 2*cov_dim)
+        params[_p(prefix, 'Wc_cov')] = Wc_cov
+
+        Wa_cov = norm_weight(1, 2*cov_dim)
+        params[_p(prefix, 'Wa_cov')] = Wa_cov
+
+        Wh_cov = norm_weight(dimctx, 2*cov_dim)
+        params[_p(prefix, 'Wh_cov')] = Wh_cov
+
+        Wt_cov = norm_weight(dim, 2*cov_dim)
+        params[_p(prefix, 'Wt_cov')] = Wt_cov
+
+        b_cov = numpy.zeros((2*cov_dim,)).astype('float32')
+        params[_p(prefix, 'b_cov')] = b_cov
+
+        Wcx_cov = norm_weight(cov_dim,  cov_dim)
+        params[_p(prefix, 'Wcx_cov')] = Wcx_cov
+
+        Wax_cov = norm_weight(1, cov_dim)
+        params[_p(prefix, 'Wax_cov')] = Wax_cov
+
+        Whx_cov = norm_weight(dimctx, cov_dim)
+        params[_p(prefix, 'Whx_cov')] = Whx_cov
+
+        Wtx_cov = norm_weight(dim, cov_dim)
+        params[_p(prefix, 'Wtx_cov')] = Wtx_cov
+
+        bx_cov = numpy.zeros((cov_dim,)).astype('float32')
+        params[_p(prefix, 'bx_cov')] = bx_cov
+
     return params
 
 
@@ -460,6 +496,7 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
     if init_state is None:
         init_state = tensor.alloc(0., n_samples, dim)
 
+
     # projected context
     pctxs_ = []
     for i, context in enumerate(contexts):
@@ -484,7 +521,6 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
                     rec_dropout, ctx_dropout,
                     Wc, Wcx, U, Ux, U_nl, Ux_nl, b_nl, bx_nl,
                     *attention_args):
-
         preact1 = tensor.dot(h_*rec_dropout[0], U)
         preact1 += x_
         preact1 = tensor.nnet.sigmoid(preact1)
@@ -540,9 +576,96 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
         # TODO: check use of ctxs_[0] and alphas
         return [h2, ctx_, alphas[0]]
 
+    def _step_slice_cov(m_, x_, xx_, h_, ctx_, alpha_, coverage_,
+                    rec_dropout, ctx_dropout,
+                    Wc, Wcx, U, Ux, U_nl, Ux_nl, b_nl, bx_nl,
+                    V_att, Wc_cov, Wa_cov, Wh_cov, Wt_cov, b_cov, Wcx_cov,
+                    Wax_cov, Whx_cov, Wtx_cov, bx_cov,
+                    *attention_args):
+
+        preact1 = tensor.dot(h_*rec_dropout[0], U)
+        preact1 += x_
+        preact1 = tensor.nnet.sigmoid(preact1)
+
+        r1 = _slice(preact1, 0, dim)
+        u1 = _slice(preact1, 1, dim)
+
+        preactx1 = tensor.dot(h_ * rec_dropout[1], Ux)
+        preactx1 *= r1
+        preactx1 += xx_
+
+        h1 = tensor.tanh(preactx1)
+
+        h1 = u1 * h_ + (1. - u1) * h1
+        h1 = m_[:, None] * h1 + (1. - m_)[:, None] * h_
+
+        # attention
+        ctxs_ = []
+        alphas = []
+        out_coverage = None
+        for i in range(len(attention_args) / 5):
+            pctx_, cc_, W_comb_att, U_att, c_tt = attention_args[i*5:i*5+5]
+            pstate_ = tensor.dot(h1 * rec_dropout[2], W_comb_att)
+            pctx__ = pctx_ + pstate_[None, :, :]
+            if i == 0:
+                pctx__ += tensor.dot(coverage_, V_att)
+            pctx__ = tensor.tanh(pctx__)
+
+            alpha = tensor.dot(pctx__ * ctx_dropout[1], U_att) + c_tt
+            alpha = alpha.reshape([alpha.shape[0], alpha.shape[1]])
+            alpha = tensor.exp(alpha)
+            if context_masks:
+                alpha = alpha * context_masks[i]
+            alpha = alpha / alpha.sum(0, keepdims=True)
+            alphas.append(alpha.T)
+            ctx_ = (cc_ * alpha[:, :, None]).sum(0)  # current context
+            ctxs_.append(ctx_)
+
+            if i == 0:
+                cov_dim = coverage_.shape[2]
+                preact_cov = tensor.dot(coverage_, Wc_cov) \
+                    + tensor.dot(alpha[:,:,None], Wa_cov) \
+                                + tensor.dot(h_, Wt_cov) \
+                                + tensor.dot(cc_, Wh_cov) \
+                                + b_cov
+                preact_cov = tensor.nnet.sigmoid(preact_cov)
+
+                r_cov = _slice(preact_cov, 0, cov_dim)
+                u_cov = _slice(preact_cov, 1, cov_dim)
+
+                preactx_cov = r_cov * tensor.dot(coverage_, Wcx_cov) \
+                    + tensor.dot(alpha[:,:,None], Wax_cov) \
+                                + tensor.dot(h_, Wtx_cov) \
+                                + tensor.dot(cc_, Whx_cov) \
+                                + bx_cov
+                h_cov = tensor.tanh(preactx_cov)
+
+                out_coverage = u_cov * coverage_ + (1. - u_cov) * h_cov
+
+        ctx_ = concatenate(ctxs_, axis=1)
+
+        preact2 = tensor.dot(h1 * rec_dropout[3], U_nl) + b_nl
+        preact2 += tensor.dot(ctx_ * ctx_dropout[2], Wc)
+        preact2 = tensor.nnet.sigmoid(preact2)
+
+        r2 = _slice(preact2, 0, dim)
+        u2 = _slice(preact2, 1, dim)
+
+        preactx2 = tensor.dot(h1 * rec_dropout[4], Ux_nl) + bx_nl
+        preactx2 *= r2
+        preactx2 += tensor.dot(ctx_ * ctx_dropout[3], Wcx)
+        h2 = tensor.tanh(preactx2)
+
+        h2 = u2 * h1 + (1. - u2) * h2
+        h2 = m_[:, None] * h2 + (1. - m_)[:, None] * h1
+
+
+        # TODO: check use of ctxs_[0] and alphas
+        return [h2, ctx_, alphas[0], out_coverage]
+
+
     seqs = [mask, state_below_, state_belowx]
-    #seqs = [mask, state_below_, state_belowx, state_belowc]
-    _step = _step_slice
+
 
     shared_vars = [tparams[_p(prefix, 'Wc')],
                    tparams[_p(prefix, 'Wcx')],
@@ -551,8 +674,7 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
                    tparams[_p(prefix, 'U_nl')],
                    tparams[_p(prefix, 'Ux_nl')],
                    tparams[_p(prefix, 'b_nl')],
-                   tparams[_p(prefix, 'bx_nl')]
-                ]
+                   tparams[_p(prefix, 'bx_nl')]]
 
     encoder_dependent = []
     for i in range(options['encoders']):
@@ -561,22 +683,41 @@ def gru_cond_layer(tparams, state_below, options, prefix='gru',
                         contexts[i],
                         tparams[_p(prefix, 'W_comb_att', i)],
                         tparams[_p(prefix, 'U_att', i)],
-                        tparams[_p(prefix, 'c_tt', i)]
-                    ]
+                        tparams[_p(prefix, 'c_tt', i)]]
+
+    _step = _step_slice
+    outputs_info_ = [init_state,
+                    tensor.alloc(0., n_samples, contexts[0].shape[2] * options['encoders']),
+                    tensor.alloc(0., n_samples, contexts[0].shape[0])]
+    one_step_args = seqs + [init_state, None, None, rec_dropout, ctx_dropout] + \
+                    shared_vars + encoder_dependent
+    if options['coverage']:
+        _step = _step_slice_cov
+        shared_vars += [tparams[_p(prefix, 'V_att')],
+                        tparams[_p(prefix, 'Wc_cov')],
+                        tparams[_p(prefix, 'Wa_cov')],
+                        tparams[_p(prefix, 'Wh_cov')],
+                        tparams[_p(prefix, 'Wt_cov')],
+                        tparams[_p(prefix, 'b_cov')],
+                        tparams[_p(prefix, 'Wcx_cov')],
+                        tparams[_p(prefix, 'Wax_cov')],
+                        tparams[_p(prefix, 'Whx_cov')],
+                        tparams[_p(prefix, 'Wtx_cov')],
+                        tparams[_p(prefix, 'bx_cov')]]
+
+        # add coverage matrix
+        in_coverage = tensor.alloc(0.0, contexts[0].shape[0], n_samples, options['coverage_dim'])
+        outputs_info_ += [in_coverage]
+        one_step_args = seqs + [init_state, None, None, in_coverage, rec_dropout, ctx_dropout] + \
+                        shared_vars + encoder_dependent
 
     if one_step:
-        rval = _step(*(seqs + [init_state, None, None, rec_dropout, ctx_dropout] +
-                       shared_vars + encoder_dependent))
+        rval = _step(*one_step_args)
     else:
         rval, updates = theano.scan(_step,
                                     sequences=seqs,
-                                    outputs_info=[init_state,
-                                                  tensor.alloc(0., n_samples,
-                                                               contexts[0].shape[2] * options['encoders']),
-                                                  # @TODO: make this work with multiple attention matrices
-                                                  tensor.alloc(0., n_samples,
-                                                               contexts[0].shape[0])],
-                                    non_sequences=[rec_dropout, ctx_dropout] + shared_vars  + encoder_dependent,
+                                    outputs_info=outputs_info_,
+                                    non_sequences=[rec_dropout, ctx_dropout] + shared_vars + encoder_dependent,
                                     name=_p(prefix, '_layers'),
                                     n_steps=nsteps,
                                     profile=profile,
@@ -1278,6 +1419,8 @@ def train(dim_word=100,  # word vector dimensionality
           dim_per_factor=None, # list of word vector dimensionalities (one per factor): [250,200,50] for total dimensionality of 500
           encoder='gru',
           decoder='gru_cond',
+          coverage=True,
+          coverage_dim=10,
           patience=10,  # early stopping patience
           max_epochs=5000,
           finish_after=10000000,  # finish after this many updates
