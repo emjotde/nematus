@@ -133,7 +133,9 @@ def main(models, source_files, saveto, save_alignment, k=5,
     dictionaries = options[0]['dictionaries']
 
     dictionaries_sources = dictionaries[:-1]
+    print >> sys.stderr, "SRC DICT:", dictionaries_sources
     dictionary_target = dictionaries[-1]
+    print >> sys.stderr, "TRG DICT:", dictionary_target
 
     encoders_word_dicts = []
     encoders_word_idicts = []
@@ -192,7 +194,7 @@ def main(models, source_files, saveto, save_alignment, k=5,
             enc_idx = 0;
             xs = []
             enc_words = []
-            for line in lines:
+            for src_idx, line in enumerate(lines):
                 if chr_level:
                     words = list(line.decode('utf-8').strip())
                 else:
@@ -200,7 +202,7 @@ def main(models, source_files, saveto, save_alignment, k=5,
 
                 x = []
                 for w in words:
-                    w = [word_dicts[i][f] if f in word_dicts[i] else 1
+                    w = [encoders_word_dicts[src_idx][i][f] if f in word_dicts[i] else 1
                         for (i, f) in enumerate(w.split('|'))]
                     if len(w) != options[0]['factors'][enc_idx]:
                         sys.stderr.write('Error: expected {0} factors, but input word has {1}\n'.format(options[0]['factors'][enc_idx], len(w)))
