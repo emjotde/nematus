@@ -188,7 +188,7 @@ def main(models, source_files, saveto, save_alignment, k=5,
     def _send_jobs(files):
         source_sentences = []
         for idx, lines in enumerate(zip(*files)):
-            print lines
+            #  print lines
             enc_idx = 0;
             xs = []
             enc_words = []
@@ -210,10 +210,10 @@ def main(models, source_files, saveto, save_alignment, k=5,
                     x.append(w)
 
                 x += [ [0] * options[0]['factors'][enc_idx] ]
-                print "X:", x
+                #  print "X:", x
                 xs.append(x)
                 enc_words.append(words)
-            print "XS:", xs
+            #  print "XS:", xs
             #  new_xs = [ [xs[j][i]   for j in range(len(xs)) ]  for i in range(len(xs[0])) ]
             #  print "NEW XS:", new_xs
             queue.put((idx, xs))
